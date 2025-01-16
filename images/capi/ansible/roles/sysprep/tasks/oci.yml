@@ -1,0 +1,191 @@
+# Copyright 2024 The Kubernetes Authors.
+
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+
+# http://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+---
+- name: Create the shell script
+  copy:
+    dest: /usr/local/bin/ensure_uhp_device.sh
+    content: |
+      #!/usr/bin/env bash
+      # shellcheck disable=SC2086,SC2174
+      set -o errexit -o nounset -o pipefail -x
+      shopt -s nullglob
+
+      uhp_device="/dev/oracleoci/oraclevdb"
+      multipath_device="/dev/mapper/mpatha"
+      default_size="500"
+      default_vpus="120"
+      default_create_bv="false"
+      mount_primary="/mnt/uhp-disk"
+      mount_extra=(/var/lib/{containerd,kubelet} /run/containerd)
+      
+      instance_metadata=$(curl -H "Authorization: Bearer Oracle" -sL http://169.254.169.254/opc/v2/instance/)
+      create_bv=$(jq --arg create_bv "$default_create_bv" -r '.metadata.create_bv // $create_bv ' <<< "$instance_metadata")
+
+      # Check if it's necessary to create device
+      if [ $create_bv == "false" ]; then
+          echo "No request for additional Block Volume."
+          exit 0
+      fi
+
+      # Check if the device exists
+
+      bvs_http_status=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer Oracle" -L http://169.254.169.254/opc/v1/volumeAttachments/)
+
+      if [ "$bvs_http_status" -eq 404 ]; then
+          bvs=0
+      else
+          bvs=$(curl -sH "Authorization: Bearer Oracle" -L http://169.254.169.254/opc/v1/volumeAttachments/ | jq length)
+      fi
+
+      if [ $bvs == 1 ]; then
+          # Wait for UHP drive to be available
+          until [ -b "$uhp_device" ]; do
+            echo "Waiting for $uhp_device to become available..."
+            sleep 1
+          done
+
+          until [ -b "$multipath_device" ]; do
+            echo "Waiting for $multipath_device to become available..."
+            sleep 1
+          done
+
+          echo "UHP block volume available."
+      else
+          
+          instance_ocid=$(jq -r .id <<< "$instance_metadata")
+          instance_ad=$(jq -r .availabilityDomain <<< "$instance_metadata")
+          compartment_id=$(jq -r .compartmentId <<< "$instance_metadata")
+          instance_name=$(jq -r .displayName <<< "$instance_metadata")
+          bv_size=$(jq --arg default_size "$default_size" -r '.metadata.bv_size // $default_size ' <<< "$instance_metadata")
+          bv_vpus=$(jq --arg default_vpus "$default_vpus" -r '.metadata.bv_vpus // $default_vpus ' <<< "$instance_metadata")
+
+          bv_metadata=$(oci bv volume create --availability-domain "$instance_ad" --compartment-id "$compartment_id" --display-name "ephemeral-bv-for-$instance_name" --freeform-tags "{\"auto-mounted-volume\": \"true\", \"parent\": \"$instance_ocid\"}" --size-in-gbs "${bv_size}" --vpus-per-gb "${bv_vpus}" --wait-for-state AVAILABLE  --auth instance_principal)
+
+          bv_ocid=$(jq -r .data.id <<< "$bv_metadata")
+
+          oci compute volume-attachment attach-iscsi-volume --instance-id "$instance_ocid" --volume-id "$bv_ocid" --device "$uhp_device" --is-agent-auto-iscsi-login-enabled true --wait-for-state ATTACHED --auth instance_principal
+
+          # Wait for UHP drive to be available
+          until [ -b "$uhp_device" ]; do
+            echo "Waiting for $uhp_device to become available..."
+            sleep 1
+          done
+
+          until [ -b "$multipath_device" ]; do
+            echo "Waiting for $multipath_device to become available..."
+            sleep 1
+          done
+
+          echo "UHP Disk $bv_ocid successfuly attached and available as $multipath_device device."
+      fi
+
+      # Check if the uhp device already has a filesystem
+      if ! blkid "$multipath_device" > /dev/null 2>&1; then
+          echo "No filesystem found on $multipath_device. Creating ext4 filesystem."
+          mkfs.ext4 "$multipath_device"
+      else
+          echo "Filesystem already exists on $multipath_device."
+      fi
+
+      mkdir -m 0755 -p "$mount_primary"
+
+      # Remove /etc/fstab.new file if exist
+      if [ -f "/etc/fstab.new" ]; then
+        rm "/etc/fstab.new"
+      fi
+
+      # Check if the device is already mounted
+      if ! mount | grep -q "$multipath_device"; then
+          echo "Mounting $multipath_device to $mount_primary."
+          mount "$multipath_device" "$mount_primary" -t ext4 -o defaults,_netdev,nofail,x-systemd.requires=multipathd.service
+          echo "$multipath_device $mount_primary ext4 defaults,_netdev,nofail,x-systemd.requires=multipathd.service 0 2" | tee -a /etc/fstab.new
+      else
+          echo "$multipath_device is already mounted."
+      fi
+
+      # Mount extra paths to UHP drive preserving old directory content
+      for mount in "${mount_extra[@]}"; do
+        temp_name="${mount//\//-}"
+        name="${temp_name:1}"
+        
+        if [ -d "$mount" ]; then
+          old_dir="${mount}-initial"
+          
+          if [ ! -d "$old_dir" ]; then
+
+            echo "Directory $mount exists. Copying to $old_dir..."
+            cp -a "$mount" "$old_dir"
+
+            mkdir -m 0755 -p "$mount_primary/$name"
+            mountpoint -q "$mount" || mount -vB "$mount_primary/$name" "$mount" || :
+            mountpoint -q "$mount" && cp -a "$old_dir"/* "$mount" || :
+          else
+            echo "$old_dir already exists. Attempting only the mount."
+            mkdir -m 0755 -p "$mount_primary/$name"
+            mountpoint -q "$mount" || mount -vB "$mount_primary/$name" "$mount" || :
+          fi
+        else
+          mkdir -m 0755 -p "${mount}"
+          mkdir -m 0755 -p "$mount_primary/$name"
+          mountpoint -q "$mount" || mount -vB "$mount_primary/$name" "$mount" || :
+        fi
+
+        echo "${mount_primary}/${name} $mount none defaults,bind 0 2" | tee -a /etc/fstab.new
+      done
+
+      # Backup fstab
+      if [ ! -e "/etc/fstab.bkp" ]; then
+        cp /etc/fstab /etc/fstab.bkp
+      fi
+
+      # Update persistent filesystem mounts
+      while IFS= read -r line; do
+        if ! grep -Fxq "$line" /etc/fstab; then
+          echo "$line" >> /etc/fstab
+        fi
+      done < /etc/fstab.new
+
+      echo "Mount script successfuly executed"
+
+    mode: '0755'
+
+- name: Create the systemd service file
+  copy:
+    dest: /etc/systemd/system/ensure_uhp_device.service
+    content: |
+      [Unit]
+      Description=Ensure UHP device /dev/oracleoci/oraclevdb
+      After=iscsi.service iscsid.service
+      Before=kubelet.service containerd.service
+      Requires=kubelet.service containerd.service
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/ensure_uhp_device.sh
+      RemainAfterExit=true
+
+      [Install]
+      WantedBy=multi-user.target
+
+- name: Reload systemd daemon
+  command: systemctl daemon-reload
+
+- name: Install oci-cli
+  command: python3 -m pip install oci-cli
+
+- name: Enable the service
+  systemd:
+    name: ensure_uhp_device.service
+    enabled: true
+    state: stopped

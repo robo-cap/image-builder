@@ -11,7 +11,6 @@
       "fingerprint": "{{user `fingerprint`}}",
       "image_name": "cluster-api-{{user `build_name`}}-{{user `kubernetes_semver`}}-{{user `build_timestamp`}}",
       "key_file": "{{user `key_file`}}",
-      "region": "{{user `region`}}",
       "shape": "{{user `shape`}}",
       "shape_config": {
         "ocpus": "{{user `ocpus`}}"
@@ -31,6 +30,7 @@
       },
       "tenancy_ocid": "{{user `tenancy_ocid`}}",
       "type": "oracle-oci",
+      "use_instance_principals": "{{user `use_instance_principals`}}",
       "use_private_ip": "{{user `use_private_ip`}}",
       "user_data": "{{user `user_data`}}",
       "user_ocid": "{{user `user_ocid`}}"
@@ -83,6 +83,7 @@
       "vars_inline": {
         "ARCH": "amd64",
         "OS": "{{user `distribution` | lower }}",
+        "OS_VERSION": "{{user `distro_version` | lower}}",
         "PROVIDER": "oci",
         "containerd_version": "{{user `containerd_version`}}",
         "kubernetes_cni_deb_version": "{{ user `kubernetes_cni_deb_version` }}",

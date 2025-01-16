@@ -27,6 +27,9 @@
 - ansible.builtin.import_tasks: photon.yml
   when: ansible_os_family == "VMware Photon OS"
 
+- ansible.builtin.import_tasks: oci.yml
+  when: packer_builder_type.startswith('oracle-oci') and ansible_os_family == "Debian"
+
 - name: Remove containerd http proxy conf file if needed
   ansible.builtin.file:
     path: /etc/systemd/system/containerd.service.d/http-proxy.conf
