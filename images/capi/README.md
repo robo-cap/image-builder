@@ -22,6 +22,7 @@ Ensure packer is installed or the `rc-image-builder/images/capi/.local/bin` is a
 
 Update the variables in the `oci.json` file.
 - the subnet has to be public and allow ingress connections on port 22.
+- the base image has to be of an [Ubuntu image 22.04](https://docs.oracle.com/en-us/iaas/images/ubuntu-2204/)
 
 Build the image:
 
