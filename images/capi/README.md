@@ -20,6 +20,8 @@ Install dependencies:
 
 Ensure packer is installed or the `rc-image-builder/images/capi/.local/bin` is added to `$PATH`.
 
+Update the variables in the `oci.json` file.
+
 Build the image:
 
     PACKER_VAR_FILES=oci.json make build-oci-ubuntu-2204
