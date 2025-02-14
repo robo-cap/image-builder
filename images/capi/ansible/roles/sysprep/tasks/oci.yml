@@ -12,6 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 ---
+- name: Copy VNIC configuration script
+  ansible.builtin.copy:
+    src: files/oci_secondary_vnic_all_configure.sh
+    dest: /root/secondary_vnic_all_configure.sh
+    mode: "0755"
+
 - name: Create the shell script
   copy:
     dest: /usr/local/bin/ensure_uhp_device.sh
@@ -28,8 +34,51 @@
       default_create_bv="false"
       mount_primary="/mnt/uhp-disk"
       mount_extra=(/var/lib/{containerd,kubelet} /run/containerd)
-      
+
+      default_secondary_vnic_subnet_id=""
+      default_secondary_vnic_nic_index=""
+      default_secondary_vnic_nsg_id=""
+
+      # Fetching the instance metadata 
       instance_metadata=$(curl -H "Authorization: Bearer Oracle" -sL http://169.254.169.254/opc/v2/instance/)
+      instance_ocid=$(jq -r .id <<< "$instance_metadata")
+
+      # Secondary VNIC setup
+      secondary_vnic_subnet_id=$(jq --arg default_secondary_vnic_subnet_id "$default_secondary_vnic_subnet_id" -r '.metadata.secondary_vnic_subnet_id // $default_secondary_vnic_subnet_id ' <<< "$instance_metadata")
+      secondary_nic_index=$(jq --arg default_secondary_vnic_nic_index "$default_secondary_vnic_nic_index" -r '.metadata.secondary_nic_index // $default_secondary_vnic_nic_index ' <<< "$instance_metadata")
+      secondary_vnic_nsg_id=$(jq --arg default_secondary_vnic_nsg_id "$default_secondary_vnic_nsg_id" -r '.metadata.secondary_vnic_nsg_id // $default_secondary_vnic_nsg_id ' <<< "$instance_metadata")
+      
+      attached_vnics_metadata=$(curl -H "Authorization: Bearer Oracle" -sL http://169.254.169.254/opc/v2/vnics/)
+      vnics_no=$(echo "$attached_vnics_metadata" | jq length)
+
+      if [[ "$vnics_no" -eq 1 && -n "$secondary_vnic_subnet_id" ]]; then
+        echo "Attaching secondary VNIC..."
+
+        if [[ -n "$secondary_nic_index" ]]; then
+          vnic_metadata=$(oci compute instance attach-vnic --auth instance_principal --instance-id $instance_ocid --skip-source-dest-check true --nic-index $secondary_nic_index --subnet-id $secondary_vnic_subnet_id --wait)
+        else
+          vnic_metadata=$(oci compute instance attach-vnic --auth instance_principal --instance-id $instance_ocid --skip-source-dest-check true --subnet-id $secondary_vnic_subnet_id --wait)
+        fi
+  
+
+        secondary_vnic_ocid=$(jq -r .data.id <<< "$vnic_metadata")
+
+        until [[ $(curl -H "Authorization: Bearer Oracle" -sL http://169.254.169.254/opc/v2/vnics/ | jq length) -eq 2 ]]; do
+          echo "Waiting for secondary VNIC to be attached..."
+          sleep 5
+        done
+        
+        if [[ -n "$secondary_vnic_nsg_id" ]]; then
+          oci network vnic update --auth instance_principal --vnic-id $secondary_vnic_ocid --nsg-ids "[\"$secondary_vnic_nsg_id\"]" --force
+        fi
+      fi
+
+      if [[ -n "$secondary_vnic_subnet_id" ]]; then
+        bash /root/secondary_vnic_all_configure.sh -c
+        echo "Secondary VNIC configured."
+      fi      
+      
+      # Setup UHP BVs
       create_bv=$(jq --arg create_bv "$default_create_bv" -r '.metadata.create_bv // $create_bv ' <<< "$instance_metadata")
 
       # Check if it's necessary to create device
@@ -63,7 +112,6 @@
           echo "UHP block volume available."
       else
           
-          instance_ocid=$(jq -r .id <<< "$instance_metadata")
           instance_ad=$(jq -r .availabilityDomain <<< "$instance_metadata")
           compartment_id=$(jq -r .compartmentId <<< "$instance_metadata")
           instance_name=$(jq -r .displayName <<< "$instance_metadata")
