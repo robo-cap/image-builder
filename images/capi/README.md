@@ -18,7 +18,7 @@ Install dependencies:
     python3.12 -m pip install --upgrade ansible
     make deps-oci
 
-Ensure packer is installed or the `rc-image-builder/images/capi/.local/bin` is added to `$PATH`.
+Ensure packer is installed or the `image-builder/images/capi/.local/bin` is added to `$PATH`.
 
 Update the variables in the `oci.json` file.
 - the subnet has to be public and allow ingress connections on port 22.

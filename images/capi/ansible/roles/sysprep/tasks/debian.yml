@@ -18,6 +18,7 @@
     machine_id_mode: "0644"
 
 - name: Pin all installed packages with apt-mark
+  become: true
   ansible.builtin.shell: |
     set -o pipefail
     dpkg-query -f '${binary:Package}\n' -W | xargs apt-mark hold
