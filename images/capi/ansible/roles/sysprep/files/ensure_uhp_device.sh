@@ -22,7 +22,7 @@ multipath_device="/dev/mapper/mpatha"
 
 ## Mounting variables
 mount_primary="/mnt/uhp-disk"
-mount_extra=(/var/lib/{containerd,kubelet} /run/containerd)
+mount_extra=(/var/lib/{containerd,kubelet})
 
 ## Secondary VNIC variables 
 default_secondary_vnic_subnet_id=""
